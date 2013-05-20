@@ -1,6 +1,6 @@
 /*
  Infrared controlled volume control
-*/
+ */
 
 #include <IRremote.h>
 #include <EEPROM.h>
@@ -8,7 +8,6 @@
 #include <LiquidCrystal.h>
 #include "mytypes.h"
 #include "EEPROMAnything.h"
-
 #define NAME "QualVol"
 #define VERSION "0.1"
 
@@ -44,35 +43,48 @@ const uint8_t CODE_DOWN = 1;
 const uint8_t CODE_MUTE = 2;
 const uint8_t CODE_MENU = 3;
 const uint8_t CODE_REPEAT = 0x80;
+const uint8_t CODE_NOTHING = 0xFF;
 
 IRrecv irrecv(IRDATA);
 decode_results results;
-IRCode lastCode = { -1 , 0 };
-IRCode code = { -1 , 0 };
+IRCode lastCode = { 
+  -1 , 0 };
+IRCode code = { 
+  -1 , 0 };
 IRCode codes[code_len];
 
 
 /* SPI timing */
 int CYCLE = 1; // 1ms clock cycle
 
-/* learn mode */
-int learn=0;
+/* 
+ * mode 
+ */
+const uint8_t MODE_VOL = 0;
+const uint8_t MODE_LEARN = 1;
+const uint8_t MODE_MENU = 2;
+
+uint8_t mode=0;
+uint8_t learn_button=0;
 
 
 /* Volume settings */
+const uint8_t ZERO_DB = 192;
 uint8_t volume;
 uint8_t lastVolume;
 uint8_t storedVolume;
 uint8_t unmutedVolume;
 uint8_t maxVol=254;
 uint8_t muted=0;
-uint8_t offset[4]; // offsets for all channels
+int8_t offset[4]; // offsets for all channels
 
 /*
  * Menu 
  */
+uint8_t menu=0;
 const uint8_t NO_MENU = 0;
-const uint8_t MENU_MAX = 1;
+const uint8_t MAX_MENU = 5;
+const uint8_t MENU_MAXVOL = 1;
 const uint8_t MENU_OFFSET1 = 2;
 const uint8_t MENU_OFFSET2 = 3;
 const uint8_t MENU_OFFSET3 = 4;
@@ -81,10 +93,11 @@ const uint8_t MENU_OFFSET4 = 5;
 /* EEPROM */
 const int OFFSET_IRCODES=0;
 const int OFFSET_VOLUME=20;
+const int OFFSET_VOLOFFSETS=21;
 
 /* 2 sec timer to store settings */
 int storeTimer = 10000;
-int repeatTimer = 300;
+int repeatTimer = 500;
 Metro storeMetro = Metro(storeTimer); 
 Metro flashMetro = Metro(0); 
 Metro repeatMetro = Metro(0); 
@@ -94,7 +107,7 @@ LiquidCrystal lcd(LCD_RS,LCD_EN,LCD_D4,LCD_D5,LCD_D6,LCD_D7);
 
 /*
  Progmem helper functions
-*/
+ */
 #define serial_nl Serial.println("")
 #define serial_print(x) Serial.print(x)
 #define serial_print_dec(x) Serial.print(x,DEC)
@@ -107,6 +120,9 @@ void SerialPrint_P(PGM_P str) {
 }
 
 #define lcd_print_p(x) LCDPrint_P(PSTR(x))
+#define lcd_clear lcd.clear();
+#define lcd_print_dec(x) lcd.print(x,DEC)
+#define lcd_print_hex(x) lcd.print(x,HEX)
 void LCDPrint_P(PGM_P str) {
   for (uint8_t c; (c = pgm_read_byte(str)); str++) lcd.write(c);
 }
@@ -121,8 +137,9 @@ void displayVolume() {
   lcd.print("Volume: ");
   if (volume==0) {
     lcd.print("Mute");
-  } else {
-    lcd.print(volume);
+  } 
+  else {
+    lcd_print_db(volume,ZERO_DB);
   }
   // 
 }
@@ -144,7 +161,8 @@ void setVolume(byte vol) {
       digitalWrite(CLOCK,HIGH);
       if (b & 0x80) {
         digitalWrite(DATA,LOW);
-      } else {
+      } 
+      else {
         digitalWrite(DATA,HIGH);
       }
       delay(CYCLE);
@@ -153,9 +171,9 @@ void setVolume(byte vol) {
       b <<= 1;
     }
   }
-  
+
   delay(CYCLE);
-  
+
   // all to low again
   digitalWrite(CS, LOW);
   digitalWrite(DATA, LOW);
@@ -175,6 +193,13 @@ void readSettingsFromEEPROM() {
   }
   lastVolume = volume - 1;
   storedVolume = volume;
+
+  // TODO:
+  offset[0] = 0;
+  offset[1] = 1;
+  offset[2] = 2;
+  offset[3] = -3;
+  maxVol = 230;
 }
 
 
@@ -183,11 +208,11 @@ void readSettingsFromEEPROM() {
 byte storeCode(decode_results *results, byte codenum) {
   code.type = results->decode_type;
   code.value = results->value;
-  
+
   lcd.setCursor(0,1);
 
   if (code.type == UNKNOWN) {
-    lcd.print("unknown ");
+    lcd_print_p("unknown ");
     return 0;
   }
   else {
@@ -197,19 +222,19 @@ byte storeCode(decode_results *results, byte codenum) {
         serial_print_p("repeat ");
         return 0;
       }
-      lcd.print("NEC: ");
+      lcd_print_p("NEC: ");
     } 
     else if (code.type == SONY) {
-      lcd.print("SONY: ");
+      lcd_print_p("SONY: ");
     } 
     else if (code.type == RC5) {
-      lcd.print("RC5: ");
+      lcd_print_p("RC5: ");
     } 
     else if (code.type == RC6) {
-      lcd.print("RC6: ");
+      lcd_print_p("RC6: ");
     } 
     else {
-      lcd.print("unknown");
+      lcd_print_p("unknown");
     }
     lcd.print(results->value,16);
     if ((code.value == lastCode.value) && (code.type == lastCode.type)) {
@@ -218,7 +243,7 @@ byte storeCode(decode_results *results, byte codenum) {
       return 0;
     }
   }
-  
+
   // store code in RAM
   lastCode.value = code.value;
   lastCode.type = code.type;
@@ -241,12 +266,81 @@ void flashLED(int millis) {
   flashMetro.reset();
 }
 
+void lcd_print_db(int value, int zero) {
+  value = value - zero;
+  if (value>=0) {
+    lcd_print_p("+");
+  } 
+  else {
+    lcd_print_p("-");
+  }
 
+  serial_print_dec(value);
+  serial_nl;
+  serial_print_dec(value/2);
+  serial_nl;
+
+  int db = abs(value/2);
+  lcd.print(db,DEC);
+
+  if (value & 1) {
+    lcd_print_p(".5 db");
+  } 
+  else {
+    lcd_print_p(".0 db");
+  }
+
+}  
+
+void menuChange(int8_t delta) {
+  int16_t v;
+  switch (menu) {
+  case MENU_MAXVOL: 
+    v=maxVol+delta;
+    if ((v>0) && (v<255)) {
+      maxVol=v;
+    }
+    break;
+  case MENU_OFFSET1: 
+  case MENU_OFFSET2: 
+  case MENU_OFFSET3: 
+  case MENU_OFFSET4: 
+    uint8_t c=menu+1-MENU_OFFSET1;
+    int8_t o=offset[c]+delta;
+    if ((o>=-32) && (o<=32)) {
+      offset[c]=o;
+    }
+    break;
+  }
+}
+
+
+void displayMenu() {
+  lcd_clear;
+  lcd_print_p("Menu ");
+  lcd_print_dec(menu);
+  lcd.setCursor(0,1);
+  switch (menu) {
+  case MENU_MAXVOL: 
+    lcd_print_p("Max: ");
+    lcd_print_db(maxVol,ZERO_DB);
+    break;
+  case MENU_OFFSET1: 
+  case MENU_OFFSET2: 
+  case MENU_OFFSET3: 
+  case MENU_OFFSET4: 
+    lcd_print_p("CH ");
+    lcd.print(menu+1-MENU_OFFSET1);
+    lcd_print_p(": ");
+    lcd_print_db(offset[menu+1-MENU_OFFSET1],0);
+    break;
+  }
+}
 
 
 
 void setup() {
-  
+
   // start serial
   Serial.begin(9600);
   serial_print_p(NAME);
@@ -258,23 +352,21 @@ void setup() {
   lcd_print_p(VERSION);
   lcd.setCursor(0,1);
   lcd_print_p("initialising");
-  
+
   // initialize outputs
   pinMode(LED, OUTPUT);     
   pinMode(CLOCK,OUTPUT);
   pinMode(CS, OUTPUT);
   pinMode(DATA, OUTPUT);
-  
+
   // initialize IR receiver
   irrecv.enableIRIn(); // Start the receiver
-  
+
   // load data from EEPROM
   readSettingsFromEEPROM();
-  
+
   // learn button
   pinMode(BUTT_LEARN, INPUT_PULLUP);
-  
-  delay(2000);
 }
 
 
@@ -282,112 +374,164 @@ short keyCode = -1;
 short lastKeyCode = -1;
 
 void loop() {
-  
-  if ((learn==0) && (digitalRead(BUTT_LEARN)==0)) {
-     learn=1;
-     lastCode.value=0;
-     lcd.clear();
-     lcd.print("Learning: UP");
+
+  if ((mode != MODE_LEARN) && (digitalRead(BUTT_LEARN)==0)) {
+    mode=MODE_LEARN;
+    learn_button=0;
+    lastCode.value=0;
+    lcd.clear();
+    lcd_print_p("Learning: UP");
   }
 
   if (irrecv.decode(&results)) {
     // Serial.println(results.value, HEX);
-    
+
     flashLED(100);
-    
+
     // learn mode
-    if (learn) {
+    if (mode==MODE_LEARN) {
 
-       if (storeCode(&results,learn-1)) {
-         serial_print_p("Code stored for ");
-         serial_print_dec(learn-1);
+      if (storeCode(&results,learn_button)) {
+        serial_print_p("Code stored for ");
+        serial_print_dec(learn_button);
 
-         learn++;
-         
-         lcd.setCursor(10,0);
-         switch (learn) {
-           case 2:  lcd_print_p("DOWN"); break;
-           case 3:  lcd_print_p("MUTE"); break;
-           case 4:  lcd_print_p("MENU"); break;
-         }
-       }
-      
-       if (learn>code_len) {
-         learn=0;
-         // wait until learn button unpressed again
-         lcd.clear();
-         while (digitalRead(BUTT_LEARN)==0) { 
-           lcd_print_p("Release");
+        learn_button++;
+
+        lcd.setCursor(10,0);
+        switch (learn_button) {
+        case 1:  
+          lcd_print_p("DOWN"); 
+          break;
+        case 2:  
+          lcd_print_p("MUTE"); 
+          break;
+        case 3:  
+          lcd_print_p("MENU"); 
+          break;
+        }
+      }
+
+      if (learn_button==code_len) {
+        mode=MODE_VOL;
+        // wait until learn button unpressed again
+        lcd.clear();
+        while (digitalRead(BUTT_LEARN)==0) { 
+          lcd_print_p("Release");
           lcd.setCursor(0,1);
           lcd_print_p("learn button !");
-           delay(500);
-           lcd.clear();
-           delay(500);
-         }
+          delay(500);
+          lcd.clear();
+          delay(500);
+        }
         EEPROM_writeAnything(OFFSET_IRCODES, codes);
         lcd_print_p("Finished IR");
         lcd.setCursor(0,1);
         lcd_print_p("learning");
         delay(1000);
         displayVolume();
-       }
-       
-    } else {
-    // use IR code
+      }
+
+    } 
+    else {
+      // use IR code
       code.value=results.value;
       code.type=results.decode_type;
       keyCode=findCode(code);
       if (keyCode != -1) {
-         serial_print_p("Key pressed: ");
-         serial_print(keyCode);
-         lastKeyCode=keyCode;
-         repeatMetro.interval(repeatTimer);
-         repeatMetro.reset();
-      } else if ((code.type == NEC)  && (code.value == REPEAT)) {
-         serial_print_p("Repeat");
-         if (repeatMetro.check()) {
-           serial_print_p("Repeating");
-           keyCode = lastKeyCode;
-           repeatMetro.interval(10);
-           repeatMetro.reset();
-         }
-      } else {
+        serial_print_p("Key pressed: ");
+        serial_print(keyCode);
+        lastKeyCode=keyCode;
+        repeatMetro.interval(repeatTimer);
+        repeatMetro.reset();
+      } 
+      else if ((code.type == NEC)  && (code.value == REPEAT)) {
+        serial_print_p("Repeat");
+        if (repeatMetro.check()) {
+          serial_print_p("Repeating");
+          if ((lastKeyCode == CODE_UP) ||
+            (lastKeyCode == CODE_DOWN)) {
+            keyCode = lastKeyCode;
+            repeatMetro.interval(10);
+            repeatMetro.reset();
+          }
+        }
+      } 
+      else {
+        keyCode = CODE_NOTHING;
+        lastKeyCode = CODE_NOTHING;
         serial_print("Unknown key :");
         serial_print_hex(results.value);
       }
-      
-      
+    }
+
+    irrecv.resume(); // Receive the next value
+  } 
+  else {
+    keyCode = CODE_NOTHING;
+  }
+
+
+  // what do to?
+  if (keyCode != CODE_NOTHING) {
+    if (mode == MODE_VOL) {
       switch (keyCode) {
-        case CODE_UP:    serial_println_p("Vol +");
-                         if ((volume<254) && (! muted)) volume++;
-                         break;
-        case CODE_DOWN:  serial_println_p("Vol -");
-                         if ((volume > 0) && (! muted)) volume--;
-                         break;
-        case CODE_MUTE:  serial_println_p("Muting");
-                         muted = ! muted;
-                         if (muted) {
-                           unmutedVolume=volume;
-                           volume=0;
-                         } else {
-                           volume=unmutedVolume;
-                         }
-                         serial_print_dec(muted);
-                         lastVolume=volume-1; // to signal, that the volume has been changed
-                         break;
+      case CODE_UP:    
+        serial_println_p("Vol +");
+        if ((volume<254) && (! muted)) volume++;
+        break;
+      case CODE_DOWN:  
+        serial_println_p("Vol -");
+        if ((volume > 0) && (! muted)) volume--;
+        break;
+      case CODE_MUTE:  
+        serial_println_p("Muting");
+        muted = ! muted;
+        if (muted) {
+          unmutedVolume=volume;
+          volume=0;
+        } 
+        else {
+          volume=unmutedVolume;
+        }
+        serial_print_dec(muted);
+        lastVolume=volume-1; // to signal, that the volume has been changed
+        break;
+      case CODE_MENU:  
+        mode=MODE_MENU;
+        menu=1;
+        break;
+      }
+    } 
+    else if (mode == MODE_MENU) {
+      switch (keyCode) {
+      case CODE_UP:
+        menuChange(+1);
+        break;    
+      case CODE_DOWN:  
+        menuChange(-1);
+        break;
+      case CODE_MENU:  
+        menu++;
+        break;
+      }
+      if (menu>MAX_MENU) {
+        mode = MODE_VOL;
+        lastVolume = volume-1;
+      } 
+      else {
+        displayMenu();
       }
     }
- 
-    irrecv.resume(); // Receive the next value
   }
-  
+
+
   // has the volume changed?
   if (volume != lastVolume) {
     setVolume(volume);
     lastVolume = volume;
     displayVolume();
   }
-  
+
   // store to EEPROM?
   if ((storeMetro.check()) && (volume != storedVolume)) {
     lcd.setCursor(15,0);
@@ -398,12 +542,17 @@ void loop() {
     storeMetro.reset();
     flashLED(1000);
   }
-  
+
   // turn LED off
   if (flashMetro.check()) {
     digitalWrite(LED,LOW);
   }
-  
+
   keyCode = -1;
 
 }
+
+
+
+
+
