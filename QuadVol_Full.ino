@@ -74,7 +74,7 @@ uint8_t volume;
 uint8_t lastVolume;
 uint8_t storedVolume;
 uint8_t unmutedVolume;
-uint8_t maxVol=254;
+uint8_t maxVolume=255;
 uint8_t muted=0;
 int8_t offset[4]; // offsets for all channels
 
@@ -148,18 +148,18 @@ void displayVolume() {
 // 0 = mute
 // 255: +31.5db
 // note that all signals are inverted!!!
-void setVolume(byte vol) {
+void updateVolume() {
 
   // we're using software-SPI here, because the SPI frequency is very low and we have to invert some signals
   digitalWrite(CS, HIGH);  
   delay(CYCLE);
 
   // set volume 4 times  
-  for (byte b=0; b<=4; b++) {
-    byte b=vol;
-    for (byte bv=0; bv<8; bv++) {
+  for (uint8_t ch=0; ch<4; ch++) {
+    uint8_t v=volume+offset[ch];
+    for (byte i=0; i<8; i++) {
       digitalWrite(CLOCK,HIGH);
-      if (b & 0x80) {
+      if (v & 0x80) {
         digitalWrite(DATA,LOW);
       } 
       else {
@@ -168,7 +168,7 @@ void setVolume(byte vol) {
       delay(CYCLE);
       digitalWrite(CLOCK,LOW);
       delay(CYCLE);
-      b <<= 1;
+      v <<= 1;
     }
   }
 
@@ -192,9 +192,9 @@ void readSettingsFromEEPROM() {
     volume = 0;
   }
 
-  maxVol = EEPROM.read(OFFSET_MAXVOL);
-  if (! maxVol) {
-    maxVol=254;
+  maxVolume = EEPROM.read(OFFSET_MAXVOL);
+  if (! maxVolume) {
+    maxVolume=255;
   }
 
   lastVolume = volume - 1;
@@ -212,7 +212,7 @@ void readSettingsFromEEPROM() {
 
 void saveSettingsToEEPROM() {
   EEPROM_writeAnything(OFFSET_VOLOFFSETS, offset);
-  EEPROM.write(OFFSET_MAXVOL,maxVol);
+  EEPROM.write(OFFSET_MAXVOL,maxVolume);
 }  
 
 
@@ -279,6 +279,21 @@ void flashLED(int millis) {
   flashMetro.reset();
 }
 
+/*
+make sure, that volume never get > 255 even with different channel offsets
+*/
+void validateVolumes() {
+  int8_t max = -127;
+  for (uint8_t i=0; i<4; i++) {
+    if (offset[i]>max) max=offset[i];
+  }
+  if (max<0) max=0;
+  uint8_t maxmax = 255 - max;
+  if (maxVolume > maxmax) maxVolume = maxmax;
+  if (volume > maxVolume) volume = maxVolume;
+}
+
+
 void lcd_print_db(int value, int zero) {
   value = value - zero;
   if (value>=0) {
@@ -297,16 +312,15 @@ void lcd_print_db(int value, int zero) {
   else {
     lcd_print_p(".0 db");
   }
-
 }  
 
 void menuChange(int8_t delta) {
   int16_t v;
   switch (menu) {
   case MENU_MAXVOL: 
-    v=maxVol+delta;
+    v=maxVolume+delta;
     if ((v>0) && (v<255)) {
-      maxVol=v;
+      maxVolume=v;
     }
     break;
   case MENU_OFFSET1: 
@@ -331,7 +345,7 @@ void displayMenu() {
   switch (menu) {
   case MENU_MAXVOL: 
     lcd_print_p("Max: ");
-    lcd_print_db(maxVol,ZERO_DB);
+    lcd_print_db(maxVolume,ZERO_DB);
     break;
   case MENU_OFFSET1: 
   case MENU_OFFSET2: 
@@ -482,7 +496,7 @@ void loop() {
       switch (keyCode) {
       case CODE_UP:    
         serial_println_p("Vol +");
-        if ((volume<254) && (! muted)) volume++;
+        if ((volume<maxVolume) && (! muted)) volume++;
         break;
       case CODE_DOWN:  
         serial_println_p("Vol -");
@@ -523,6 +537,7 @@ void loop() {
       if (menu>MAX_MENU) {
         mode = MODE_VOL;
         lastVolume = volume-1;
+        validateVolumes();
         saveSettingsToEEPROM();
       } 
       else {
@@ -535,7 +550,7 @@ void loop() {
 
   // has the volume changed?
   if (volume != lastVolume) {
-    setVolume(volume);
+    updateVolume();
     lastVolume = volume;
     displayVolume();
   }
@@ -543,7 +558,6 @@ void loop() {
   // store to EEPROM?
   if ((storeMetro.check()) && (volume != storedVolume)) {
     lcd.setCursor(15,1);
-    lcd.print("*");
     serial_print_p("Storing volume: ");
     serial_println(volume);
     storeVolume();
