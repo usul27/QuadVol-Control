@@ -91,9 +91,10 @@ const uint8_t MENU_OFFSET3 = 4;
 const uint8_t MENU_OFFSET4 = 5;
 
 /* EEPROM */
-const int OFFSET_IRCODES=0;
-const int OFFSET_VOLUME=20;
-const int OFFSET_VOLOFFSETS=21;
+const int OFFSET_IRCODES=0x80;
+const int OFFSET_VOLUME=0;
+const int OFFSET_MAXVOL=1;
+const int OFFSET_VOLOFFSETS=2;
 
 /* 2 sec timer to store settings */
 int storeTimer = 10000;
@@ -141,7 +142,6 @@ void displayVolume() {
   else {
     lcd_print_db(volume,ZERO_DB);
   }
-  // 
 }
 
 // set the volume on all 4 channels to the same level
@@ -191,16 +191,29 @@ void readSettingsFromEEPROM() {
     // EEPROM defaults to 0xFF which is EXTREMELY loud, will ignore this
     volume = 0;
   }
+
+  maxVol = EEPROM.read(OFFSET_MAXVOL);
+  if (! maxVol) {
+    maxVol=254;
+  }
+
   lastVolume = volume - 1;
   storedVolume = volume;
 
-  // TODO:
-  offset[0] = 0;
-  offset[1] = 1;
-  offset[2] = 2;
-  offset[3] = -3;
-  maxVol = 230;
+  EEPROM_readAnything(OFFSET_VOLOFFSETS, offset);
+  for (uint8_t i=0; i<4; i++) {
+    if ((offset[i]<-32) || (offset[i]>32)) {
+      offset[i]=0;
+    }
+  }
+
 }
+
+
+void saveSettingsToEEPROM() {
+  EEPROM_writeAnything(OFFSET_VOLOFFSETS, offset);
+  EEPROM.write(OFFSET_MAXVOL,maxVol);
+}  
 
 
 // Stores the code for later playback
@@ -275,11 +288,6 @@ void lcd_print_db(int value, int zero) {
     lcd_print_p("-");
   }
 
-  serial_print_dec(value);
-  serial_nl;
-  serial_print_dec(value/2);
-  serial_nl;
-
   int db = abs(value/2);
   lcd.print(db,DEC);
 
@@ -305,7 +313,7 @@ void menuChange(int8_t delta) {
   case MENU_OFFSET2: 
   case MENU_OFFSET3: 
   case MENU_OFFSET4: 
-    uint8_t c=menu+1-MENU_OFFSET1;
+    uint8_t c=menu-MENU_OFFSET1;
     int8_t o=offset[c]+delta;
     if ((o>=-32) && (o<=32)) {
       offset[c]=o;
@@ -330,9 +338,9 @@ void displayMenu() {
   case MENU_OFFSET3: 
   case MENU_OFFSET4: 
     lcd_print_p("CH ");
-    lcd.print(menu+1-MENU_OFFSET1);
+    lcd.print(menu-MENU_OFFSET1+1);
     lcd_print_p(": ");
-    lcd_print_db(offset[menu+1-MENU_OFFSET1],0);
+    lcd_print_db(offset[menu-MENU_OFFSET1],0);
     break;
   }
 }
@@ -384,7 +392,6 @@ void loop() {
   }
 
   if (irrecv.decode(&results)) {
-    // Serial.println(results.value, HEX);
 
     flashLED(100);
 
@@ -438,14 +445,12 @@ void loop() {
       code.type=results.decode_type;
       keyCode=findCode(code);
       if (keyCode != -1) {
-        serial_print_p("Key pressed: ");
-        serial_print(keyCode);
         lastKeyCode=keyCode;
         repeatMetro.interval(repeatTimer);
         repeatMetro.reset();
       } 
       else if ((code.type == NEC)  && (code.value == REPEAT)) {
-        serial_print_p("Repeat");
+        serial_println_p("Repeat");
         if (repeatMetro.check()) {
           serial_print_p("Repeating");
           if ((lastKeyCode == CODE_UP) ||
@@ -504,21 +509,24 @@ void loop() {
     } 
     else if (mode == MODE_MENU) {
       switch (keyCode) {
-      case CODE_UP:
-        menuChange(+1);
-        break;    
-      case CODE_DOWN:  
+      case CODE_UP:  
+        menuChange(1);
+        break;
+      case CODE_DOWN:   
         menuChange(-1);
         break;
-      case CODE_MENU:  
+      case CODE_MENU:
         menu++;
         break;
       }
+
       if (menu>MAX_MENU) {
         mode = MODE_VOL;
         lastVolume = volume-1;
+        saveSettingsToEEPROM();
       } 
       else {
+        serial_print_dec(menu);
         displayMenu();
       }
     }
@@ -534,7 +542,7 @@ void loop() {
 
   // store to EEPROM?
   if ((storeMetro.check()) && (volume != storedVolume)) {
-    lcd.setCursor(15,0);
+    lcd.setCursor(15,1);
     lcd.print("*");
     serial_print_p("Storing volume: ");
     serial_println(volume);
@@ -551,6 +559,10 @@ void loop() {
   keyCode = -1;
 
 }
+
+
+
+
 
 
 
